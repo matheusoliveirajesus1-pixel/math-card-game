@@ -3,12 +3,25 @@ const crypto = require("crypto");
 const WebSocket = require("ws");
 
 const PORT = process.env.PORT || 3000;
-const MAX_ROUNDS = 5;
-const HAND_SIZE = 7;
+const HAND_SIZE = 3;
 const ROOM_CODE_LENGTH = 6;
-const NUMBER_VALUES = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-const OPERATORS = ["+", "*", "x", "/", "%"];
+const TARGET_SCORE = 10;
 const EPSILON = 0.0001;
+
+const NUMBER_VALUES = [
+  1, 2, 3, 4, 5, 6, 7, 8, 9,
+  10, 12, 15, 18, 20, 24, 25, 30,
+  40, 50, 67, 99, 100
+];
+
+const SPECIAL_CARDS = [
+  "skip_response",
+  "skip_response",
+  "memory_extra",
+  "memory_extra",
+  "bonus",
+  "bonus"
+];
 
 const rooms = new Map();
 const clients = new Map();
@@ -100,7 +113,7 @@ function handleMessage(ws, raw) {
   }
 
   if (type === "leave_room") {
-    removePlayer(ws, room, false);
+    removePlayer(ws, room);
     return;
   }
 
@@ -120,13 +133,19 @@ function createRoom(ws, data) {
     players: [player],
     phase: "lobby",
     round: 1,
-    maxRounds: MAX_ROUNDS,
+    maxRounds: null,
+    targetScore: TARGET_SCORE,
     turnIndex: 0,
     responderIndex: 0,
     stack: [],
+    deck: [],
+    discardPile: [],
+    deckRemaining: 0,
     autoClosedRound: false,
     lastResult: null,
-    winnerText: ""
+    winnerText: "",
+    consecutiveDeadTurns: 0,
+    pendingTargetWinnerId: null
   };
 
   rooms.set(roomCode, room);
@@ -192,38 +211,60 @@ function startGame(ws, room) {
     return;
   }
 
-  if (room.players.length < 2) {
-    sendError(ws, "A sala precisa de pelo menos 2 jogadores.");
-    return;
-  }
-
   if (room.players.length !== room.playerCount) {
     sendError(ws, "A sala precisa estar completa antes de iniciar.");
     return;
   }
 
+  room.deck = createDeck();
+  room.discardPile = [];
+  room.round = 1;
+  room.lastResult = null;
+  room.winnerText = "";
+  room.pendingTargetWinnerId = null;
+
   room.players.forEach((player) => {
     player.score = 0;
+    player.hand = [];
+    player.bonusArmed = false;
+    player.memoryPeek = null;
   });
-  room.round = 1;
-  room.winnerText = "";
-  room.lastResult = null;
+
   startRound(room);
 }
 
 function startRound(room) {
+  resetRoundState(room);
+
+  const initialCard = drawCard(room, (card) => card.type === "number");
+  if (!initialCard) {
+    finishGame(room, "A cava acabou e nao ha numero suficiente para abrir uma nova rodada.");
+    return;
+  }
+
+  room.stack = [initialCard];
+
+  room.players.forEach((player) => {
+    topUpHand(room, player);
+  });
+
+  room.deckRemaining = room.deck.length;
+  processForcedTurns(room);
+}
+
+function resetRoundState(room) {
   room.phase = "playing";
   room.turnIndex = 0;
   room.responderIndex = (room.round - 1) % room.players.length;
-  room.stack = [drawNumberCard()];
+  room.stack = [];
   room.autoClosedRound = false;
   room.lastResult = null;
+  room.consecutiveDeadTurns = 0;
 
   room.players.forEach((player) => {
-    player.hand = buildHand();
+    player.bonusArmed = false;
+    player.memoryPeek = null;
   });
-
-  broadcastRoom(room);
 }
 
 function playCard(ws, room, data) {
@@ -245,32 +286,102 @@ function playCard(ws, room, data) {
     return;
   }
 
-  const expected = expectedType(room);
   const card = player.hand[cardIndex];
-  if (card.type !== expected) {
+  if (!isCardPlayable(room, player, card)) {
     sendError(ws, "Essa carta nao e valida neste momento.");
     return;
   }
 
-  room.stack.push(card);
   player.hand.splice(cardIndex, 1);
-  room.turnIndex += 1;
+  room.consecutiveDeadTurns = 0;
 
-  if (room.turnIndex >= room.players.length) {
-    finishPlayPhase(room);
+  if (card.type === "special") {
+    room.discardPile.push(card);
+    applySpecialCard(room, player, card);
+  } else {
+    room.stack.push(card);
+  }
+
+  topUpHand(room, player);
+  room.deckRemaining = room.deck.length;
+
+  if (room.phase === "finished") {
+    broadcastRoom(room);
     return;
   }
 
+  advanceTurn(room);
+  processForcedTurns(room);
+}
+
+function processForcedTurns(room) {
+  if (room.phase !== "playing") {
+    broadcastRoom(room);
+    return;
+  }
+
+  while (room.phase === "playing") {
+    if (room.turnIndex >= room.players.length) {
+      finishPlayPhase(room);
+      break;
+    }
+
+    const player = room.players[room.turnIndex];
+    if (!player) {
+      break;
+    }
+
+    if (playerHasPlayableCard(room, player)) {
+      break;
+    }
+
+    handleDeadTurn(room, player);
+    if (room.phase !== "playing") {
+      break;
+    }
+  }
+
+  room.deckRemaining = room.deck.length;
   broadcastRoom(room);
+}
+
+function handleDeadTurn(room, player) {
+  discardRandomCard(player, room);
+  const replacement = drawCard(room);
+  if (replacement) {
+    player.hand.push(replacement);
+  }
+
+  room.consecutiveDeadTurns += 1;
+
+  if (room.consecutiveDeadTurns >= room.players.length) {
+    if (isExpressionValid(room.stack)) {
+      room.phase = "answer";
+    } else {
+      finishGame(room, "A rodada travou e a cava nao conseguiu fechar uma expressao valida.");
+    }
+    return;
+  }
+
+  room.deckRemaining = room.deck.length;
+  room.lastResult = null;
+  room.autoClosedRound = false;
+
+  advanceTurn(room);
 }
 
 function finishPlayPhase(room) {
   if (expectedType(room) === "number") {
+    const closingCard = drawCard(room, (card) => card.type === "number");
+    if (!closingCard) {
+      finishGame(room, "A cava acabou e nao foi possivel fechar a expressao da rodada.");
+      return;
+    }
     room.autoClosedRound = true;
-    room.stack.push(drawNumberCard());
+    room.stack.push(closingCard);
   }
+
   room.phase = "answer";
-  broadcastRoom(room);
 }
 
 function submitAnswer(ws, room, data) {
@@ -294,8 +405,15 @@ function submitAnswer(ws, room, data) {
 
   const evaluation = evaluateExpression(room.stack);
   const correct = Math.abs(answer - evaluation.value) < EPSILON;
+  const basePoints = calculateComplexityPoints(evaluation.operatorCount);
+  let awardedPoints = 0;
+
   if (correct) {
-    responder.score += 2;
+    awardedPoints += basePoints;
+    if (player.bonusArmed) {
+      awardedPoints += 1;
+    }
+    responder.score += awardedPoints;
   }
 
   room.lastResult = {
@@ -304,14 +422,20 @@ function submitAnswer(ws, room, data) {
     answer: normalizeNumber(answer),
     correct: correct,
     responderName: responder.name,
-    autoClosedRound: room.autoClosedRound
+    autoClosedRound: room.autoClosedRound,
+    basePoints: basePoints,
+    awardedPoints: awardedPoints,
+    operatorCount: evaluation.operatorCount,
+    usedBonus: correct && player.bonusArmed
   };
 
-  room.phase = room.round >= room.maxRounds ? "finished" : "reveal";
-  if (room.phase === "finished") {
-    room.winnerText = computeWinnerText(room);
+  if (responder.score >= room.targetScore || room.pendingTargetWinnerId) {
+    finishGame(room, computeWinnerText(room));
+    return;
   }
 
+  room.phase = "reveal";
+  room.deckRemaining = room.deck.length;
   broadcastRoom(room);
 }
 
@@ -327,11 +451,18 @@ function advanceRound(ws, room) {
   }
 
   if (room.phase === "finished") {
-    room.players.forEach((player) => {
-      player.score = 0;
-    });
+    room.deck = createDeck();
+    room.discardPile = [];
     room.round = 1;
     room.winnerText = "";
+    room.lastResult = null;
+    room.pendingTargetWinnerId = null;
+    room.players.forEach((player) => {
+      player.score = 0;
+      player.hand = [];
+      player.bonusArmed = false;
+      player.memoryPeek = null;
+    });
     startRound(room);
     return;
   }
@@ -340,7 +471,7 @@ function advanceRound(ws, room) {
   startRound(room);
 }
 
-function removePlayer(ws, room, disconnected) {
+function removePlayer(ws, room) {
   const record = clients.get(ws);
   if (!record) return;
 
@@ -359,38 +490,159 @@ function removePlayer(ws, room, disconnected) {
 
   if (room.hostPlayerId === record.playerId) {
     room.hostPlayerId = room.players[0].id;
-    room.players[0].isHost = true;
   }
 
   room.players.forEach((player) => {
     player.isHost = player.id === room.hostPlayerId;
   });
 
-  if (room.phase !== "lobby") {
-    room.phase = "lobby";
-    room.round = 1;
-    room.turnIndex = 0;
-    room.responderIndex = 0;
-    room.stack = [];
-    room.lastResult = null;
-    room.winnerText = "";
-    room.autoClosedRound = false;
-  }
+  room.phase = "lobby";
+  room.round = 1;
+  room.turnIndex = 0;
+  room.responderIndex = 0;
+  room.stack = [];
+  room.lastResult = null;
+  room.winnerText = "";
+  room.pendingTargetWinnerId = null;
+  room.deck = [];
+  room.discardPile = [];
+  room.deckRemaining = 0;
 
-  if (disconnected) {
-    broadcastRoom(room);
-  } else {
-    broadcastRoom(room);
-  }
+  broadcastRoom(room);
 }
 
 function handleDisconnect(ws) {
   const room = getRoomForSocket(ws);
   if (room) {
-    removePlayer(ws, room, true);
+    removePlayer(ws, room);
   } else {
     clients.delete(ws);
   }
+}
+
+function applySpecialCard(room, player, card) {
+  if (card.value === "skip_response") {
+    player.score += 1;
+    room.responderIndex = (room.responderIndex + 1) % room.players.length;
+    if (player.score >= room.targetScore) {
+      room.pendingTargetWinnerId = player.id;
+    }
+    return;
+  }
+
+  if (card.value === "bonus") {
+    player.bonusArmed = true;
+    return;
+  }
+
+  if (card.value === "memory_extra") {
+    const peekCard = room.stack.length >= 2 ? room.stack[room.stack.length - 2] : null;
+    player.memoryPeek = {
+      id: createId(),
+      card: peekCard ? { type: peekCard.type, value: peekCard.value } : null
+    };
+  }
+}
+
+function topUpHand(room, player) {
+  while (player.hand.length < HAND_SIZE) {
+    const card = drawCard(room);
+    if (!card) break;
+    player.hand.push(card);
+  }
+}
+
+function drawCard(room, predicate) {
+  const matcher = predicate || (() => true);
+  const candidates = [];
+
+  for (let index = 0; index < room.deck.length; index += 1) {
+    if (matcher(room.deck[index])) {
+      candidates.push(index);
+    }
+  }
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const chosenIndex = candidates[randomInt(0, candidates.length - 1)];
+  const card = room.deck.splice(chosenIndex, 1)[0];
+  room.deckRemaining = room.deck.length;
+  return card;
+}
+
+function discardRandomCard(player, room) {
+  if (player.hand.length === 0) {
+    return null;
+  }
+
+  const index = randomInt(0, player.hand.length - 1);
+  const [card] = player.hand.splice(index, 1);
+  if (card) {
+    room.discardPile.push(card);
+  }
+  return card || null;
+}
+
+function playerHasPlayableCard(room, player) {
+  return player.hand.some((card) => isCardPlayable(room, player, card));
+}
+
+function isCardPlayable(room, player, card) {
+  const currentPlayer = room.players[room.turnIndex];
+  if (!currentPlayer || currentPlayer.id !== player.id) {
+    return false;
+  }
+
+  if (card.type === "special") {
+    return true;
+  }
+
+  return card.type === expectedType(room);
+}
+
+function isExpressionValid(stack) {
+  if (!stack.length) return false;
+  if (stack[0].type !== "number") return false;
+
+  for (let index = 1; index < stack.length; index += 1) {
+    const expected = index % 2 === 1 ? "operator" : "number";
+    if (stack[index].type !== expected) {
+      return false;
+    }
+  }
+
+  return stack[stack.length - 1].type === "number";
+}
+
+function advanceTurn(room) {
+  room.turnIndex += 1;
+}
+
+function finishGame(room, reason) {
+  room.phase = "finished";
+  room.winnerText = reason === computeWinnerText(room) ? reason : computeWinnerText(room);
+  room.deckRemaining = room.deck.length;
+  if (!room.lastResult && reason && reason !== room.winnerText) {
+    room.lastResult = {
+      expression: room.stack.length ? expressionFromCards(room.stack) : "-",
+      result: room.stack.length && isExpressionValid(room.stack) ? evaluateExpression(room.stack).value : "-",
+      answer: "-",
+      correct: false,
+      responderName: room.players[room.responderIndex] ? room.players[room.responderIndex].name : "-",
+      autoClosedRound: room.autoClosedRound,
+      basePoints: 0,
+      awardedPoints: 0,
+      operatorCount: countOperators(room.stack),
+      usedBonus: false,
+      finishReason: reason
+    };
+  } else if (room.lastResult) {
+    room.lastResult.finishReason = reason;
+  }
+
+  broadcastRoom(room);
 }
 
 function getRoomForSocket(ws) {
@@ -412,7 +664,7 @@ function isHost(ws, room) {
 
 function expectedType(room) {
   const top = room.stack[room.stack.length - 1];
-  return top.type === "number" ? "operator" : "number";
+  return top && top.type === "number" ? "operator" : "number";
 }
 
 function broadcastRoom(room) {
@@ -434,6 +686,8 @@ function publicRoomState(room) {
     playerCount: room.playerCount,
     round: room.round,
     maxRounds: room.maxRounds,
+    targetScore: room.targetScore,
+    deckRemaining: room.deckRemaining,
     expectedType: room.phase === "playing" ? expectedType(room) : null,
     hostPlayerId: room.hostPlayerId,
     responderPlayerId: responder ? responder.id : null,
@@ -447,16 +701,18 @@ function publicRoomState(room) {
       isHost: player.id === room.hostPlayerId
     })),
     lastResult: room.lastResult,
-    winnerText: room.winnerText
+    winnerText: room.winnerText,
+    consecutiveDeadTurns: room.consecutiveDeadTurns
   };
 }
 
 function privateView(room, player) {
+  const currentPlayer = room.players[room.turnIndex] || null;
   const hand = player.hand.map((card) => ({
     id: card.id,
     type: card.type,
     value: card.value,
-    playable: room.phase === "playing" && player.id === room.players[room.turnIndex].id && card.type === expectedType(room)
+    playable: room.phase === "playing" && currentPlayer && currentPlayer.id === player.id && isCardPlayable(room, player, card)
   }));
 
   const stack = room.stack.map((card, index) => {
@@ -485,8 +741,9 @@ function privateView(room, player) {
     },
     hand: room.phase === "lobby" ? [] : hand,
     stack: stack,
-    canPlay: room.phase === "playing" && room.players[room.turnIndex] && room.players[room.turnIndex].id === player.id,
+    canPlay: room.phase === "playing" && currentPlayer && currentPlayer.id === player.id,
     canAnswer: room.phase === "answer" && room.players[room.responderIndex] && room.players[room.responderIndex].id === player.id,
+    memoryPeek: player.memoryPeek,
     infoMessage: makeInfoMessage(room, player)
   };
 }
@@ -499,7 +756,7 @@ function makeInfoMessage(room, player) {
   if (room.phase === "playing") {
     const current = room.players[room.turnIndex];
     if (current && current.id === player.id) {
-      return "Seu turno. Jogue um " + labelType(expectedType(room)) + ".";
+      return "Seu turno. Jogue uma carta valida ou use uma especial.";
     }
     return current ? current.name + " esta jogando agora." : "Aguardando turno.";
   }
@@ -530,62 +787,82 @@ function buildPlayer(ws, name, isHostPlayer) {
     name: name,
     score: 0,
     hand: [],
-    isHost: isHostPlayer
+    isHost: isHostPlayer,
+    bonusArmed: false,
+    memoryPeek: null
   };
 }
 
-function buildHand() {
-  const hand = [];
-  for (let index = 0; index < HAND_SIZE; index += 1) {
-    hand.push(Math.random() < 0.55 ? drawNumberCard() : drawOperatorCard());
+function createDeck() {
+  const deck = [];
+
+  NUMBER_VALUES.forEach((value) => {
+    deck.push(makeCard("number", value));
+  });
+
+  for (let copies = 0; copies < 3; copies += 1) {
+    deck.push(makeCard("operator", "+"));
+    deck.push(makeCard("operator", "-"));
+    deck.push(makeCard("operator", "*"));
+    deck.push(makeCard("operator", "%"));
   }
 
-  if (!hand.some((card) => card.type === "number")) {
-    hand[0] = drawNumberCard();
-  }
-  if (!hand.some((card) => card.type === "operator")) {
-    hand[1] = drawOperatorCard();
-  }
+  SPECIAL_CARDS.forEach((value) => {
+    deck.push(makeCard("special", value));
+  });
 
-  return hand;
+  return deck;
 }
 
-function drawNumberCard() {
+function makeCard(type, value) {
   return {
     id: createId(),
-    type: "number",
-    value: NUMBER_VALUES[randomInt(0, NUMBER_VALUES.length - 1)]
-  };
-}
-
-function drawOperatorCard() {
-  return {
-    id: createId(),
-    type: "operator",
-    value: OPERATORS[randomInt(0, OPERATORS.length - 1)]
+    type: type,
+    value: value
   };
 }
 
 function evaluateExpression(cards) {
   let total = Number(cards[0].value);
   const tokens = [String(cards[0].value)];
+  let operatorCount = 0;
 
   for (let index = 1; index < cards.length; index += 2) {
     const operator = cards[index].value;
     const nextValue = Number(cards[index + 1].value);
+    operatorCount += 1;
     tokens.push(displayOperator(operator), String(nextValue));
 
     if (operator === "+") total += nextValue;
+    if (operator === "-") total -= nextValue;
     if (operator === "*") total *= nextValue;
-    if (operator === "x") total *= nextValue;
-    if (operator === "/") total /= nextValue;
     if (operator === "%") total %= nextValue;
   }
 
   return {
     value: normalizeNumber(total),
-    expression: tokens.join(" ")
+    expression: tokens.join(" "),
+    operatorCount: operatorCount
   };
+}
+
+function expressionFromCards(cards) {
+  return cards.map((card) => {
+    if (card.type === "operator") return displayOperator(card.value);
+    if (card.type === "special") return specialLabel(card.value);
+    return String(card.value);
+  }).join(" ");
+}
+
+function calculateComplexityPoints(operatorCount) {
+  if (operatorCount <= 0) return 0;
+  if (operatorCount === 1) return 1;
+  if (operatorCount === 2) return 2;
+  return 4;
+}
+
+function countOperators(cards) {
+  return cards.filter((card) => card.type === "operator").length;
 }
 
 function computeWinnerText(room) {
@@ -637,13 +914,15 @@ function randomInt(min, max) {
 }
 
 function displayOperator(operator) {
-  if (operator === "x") return "\u00d7";
-  if (operator === "/") return "\u00f7";
+  if (operator === "*") return "\u00d7";
   return operator;
 }
 
-function labelType(type) {
-  return type === "number" ? "numero" : "operador";
+function specialLabel(kind) {
+  if (kind === "skip_response") return "Pular";
+  if (kind === "memory_extra") return "Memoria";
+  if (kind === "bonus") return "Bonus";
+  return "Especial";
 }
 
 function normalizeNumber(value) {
