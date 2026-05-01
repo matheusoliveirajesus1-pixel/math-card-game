@@ -893,6 +893,7 @@
         <div class="status-row"><span>Rodada</span><strong id="roundInfo">-</strong></div>
         <div class="status-row"><span>Turno</span><strong id="turnInfo">-</strong></div>
         <div class="status-row"><span>Respondedor</span><strong id="responderInfo">-</strong></div>
+        <div class="status-row"><span>Tempo</span><strong id="answerTimerInfo">-</strong></div>
         <div class="status-row"><span>Proxima carta</span><strong id="expectedInfo">-</strong></div>
       </aside>
     </section>
@@ -1047,6 +1048,7 @@
       roundInfo: document.getElementById("roundInfo"),
       turnInfo: document.getElementById("turnInfo"),
       responderInfo: document.getElementById("responderInfo"),
+      answerTimerInfo: document.getElementById("answerTimerInfo"),
       expectedInfo: document.getElementById("expectedInfo"),
       messageBar: document.getElementById("messageBar"),
       stackZone: document.getElementById("stackZone"),
@@ -1087,6 +1089,9 @@
     function bootstrap() {
       applyDeviceMode();
       window.addEventListener("resize", applyDeviceMode);
+      window.setInterval(() => {
+        renderAnswerTimer();
+      }, 250);
       const params = new URLSearchParams(window.location.search);
       const serverParam = params.get("server");
       if (serverParam) {
@@ -1397,13 +1402,18 @@
         els.roundInfo.textContent = "-";
         els.turnInfo.textContent = "-";
         els.responderInfo.textContent = "-";
+        els.answerTimerInfo.textContent = "-";
         els.expectedInfo.textContent = "-";
         return;
       }
 
-      els.roundInfo.textContent = appState.room.maxRounds ? (appState.room.round + " / " + appState.room.maxRounds) : String(appState.room.round);
+      const turnProgress = appState.room.phase === "playing" && appState.room.totalTurnsThisRound
+        ? " | jogada " + (appState.room.playedTurnsThisRound + 1) + "/" + appState.room.totalTurnsThisRound
+        : "";
+      els.roundInfo.textContent = (appState.room.maxRounds ? (appState.room.round + " / " + appState.room.maxRounds) : String(appState.room.round)) + turnProgress;
       els.turnInfo.textContent = appState.room.turnPlayerName || "-";
       els.responderInfo.textContent = appState.room.responderPlayerName || "-";
+      renderAnswerTimer();
       if (appState.room.phase === "playing") {
         els.expectedInfo.textContent = labelType(appState.room.expectedType) + " | cava " + appState.room.deckRemaining;
       } else {
@@ -1549,9 +1559,7 @@
         clearTimeout(appState.peekTimer);
       }
 
-      els.peekToast.innerHTML = peek.card
-        ? 'Memoria Extra ativada.<strong>' + printableValue(peek.card) + "</strong>"
-        : "Memoria Extra ativada.<strong>Sem carta abaixo do topo</strong>";
+      els.peekToast.innerHTML = 'Memoria Extra ativada.<strong>' + escapeHtml(peek.expression || "Sem conta atual") + "</strong>";
       els.peekToast.classList.remove("hidden");
 
       appState.peekTimer = setTimeout(() => {
@@ -1564,6 +1572,7 @@
       els.roundInfo.textContent = "-";
       els.turnInfo.textContent = "-";
       els.responderInfo.textContent = "-";
+      els.answerTimerInfo.textContent = "-";
       els.expectedInfo.textContent = "-";
       els.stackZone.innerHTML = "";
       els.answerForm.classList.add("hidden");
@@ -1610,6 +1619,17 @@
 
     function setMessage(text) {
       els.messageBar.textContent = text;
+    }
+
+    function renderAnswerTimer() {
+      if (!appState.room || appState.room.phase !== "answer" || !appState.room.answerDeadlineAt) {
+        els.answerTimerInfo.textContent = "-";
+        return;
+      }
+
+      const remainingMs = Math.max(0, appState.room.answerDeadlineAt - Date.now());
+      const seconds = Math.ceil(remainingMs / 1000);
+      els.answerTimerInfo.textContent = seconds + "s";
     }
 
     function setConnectStatus(text) {
