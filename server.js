@@ -4,8 +4,10 @@ const WebSocket = require("ws");
 
 const PORT = process.env.PORT || 3000;
 const HAND_SIZE = 3;
+const TURNS_PER_PLAYER_PER_ROUND = 2;
 const ROOM_CODE_LENGTH = 6;
 const TARGET_SCORE = 10;
+const ANSWER_TIME_MS = 60000;
 const EPSILON = 0.0001;
 
 const NUMBER_VALUES = [
@@ -145,7 +147,11 @@ function createRoom(ws, data) {
     lastResult: null,
     winnerText: "",
     consecutiveDeadTurns: 0,
-    pendingTargetWinnerId: null
+    pendingTargetWinnerId: null,
+    answerDeadlineAt: null,
+    answerTimerId: null,
+    playedTurnsThisRound: 0,
+    totalTurnsThisRound: 0
   };
 
   rooms.set(roomCode, room);
@@ -222,6 +228,7 @@ function startGame(ws, room) {
   room.lastResult = null;
   room.winnerText = "";
   room.pendingTargetWinnerId = null;
+  clearAnswerTimer(room);
 
   room.players.forEach((player) => {
     player.score = 0;
@@ -260,6 +267,9 @@ function resetRoundState(room) {
   room.autoClosedRound = false;
   room.lastResult = null;
   room.consecutiveDeadTurns = 0;
+  room.answerDeadlineAt = null;
+  room.playedTurnsThisRound = 0;
+  room.totalTurnsThisRound = room.players.length * TURNS_PER_PLAYER_PER_ROUND;
 
   room.players.forEach((player) => {
     player.bonusArmed = false;
@@ -321,7 +331,7 @@ function processForcedTurns(room) {
   }
 
   while (room.phase === "playing") {
-    if (room.turnIndex >= room.players.length) {
+    if (room.playedTurnsThisRound >= room.totalTurnsThisRound) {
       finishPlayPhase(room);
       break;
     }
@@ -354,12 +364,12 @@ function handleDeadTurn(room, player) {
 
   room.consecutiveDeadTurns += 1;
 
-  if (room.consecutiveDeadTurns >= room.players.length) {
-    if (isExpressionValid(room.stack)) {
-      room.phase = "answer";
-    } else {
-      finishGame(room, "A rodada travou e a cava nao conseguiu fechar uma expressao valida.");
-    }
+    if (room.consecutiveDeadTurns >= room.players.length) {
+      if (isExpressionValid(room.stack)) {
+        enterAnswerPhase(room);
+      } else {
+        finishGame(room, "A rodada travou e a cava nao conseguiu fechar uma expressao valida.");
+      }
     return;
   }
 
@@ -381,7 +391,7 @@ function finishPlayPhase(room) {
     room.stack.push(closingCard);
   }
 
-  room.phase = "answer";
+  enterAnswerPhase(room);
 }
 
 function submitAnswer(ws, room, data) {
@@ -407,6 +417,7 @@ function submitAnswer(ws, room, data) {
   const correct = Math.abs(answer - evaluation.value) < EPSILON;
   const basePoints = calculateComplexityPoints(evaluation.operatorCount);
   let awardedPoints = 0;
+  clearAnswerTimer(room);
 
   if (correct) {
     awardedPoints += basePoints;
@@ -451,6 +462,7 @@ function advanceRound(ws, room) {
   }
 
   if (room.phase === "finished") {
+    clearAnswerTimer(room);
     room.deck = createDeck();
     room.discardPile = [];
     room.round = 1;
@@ -536,10 +548,10 @@ function applySpecialCard(room, player, card) {
   }
 
   if (card.value === "memory_extra") {
-    const peekCard = room.stack.length >= 2 ? room.stack[room.stack.length - 2] : null;
+    const currentExpression = room.stack.length ? expressionFromCards(room.stack) : "Sem cartas na pilha";
     player.memoryPeek = {
       id: createId(),
-      card: peekCard ? { type: peekCard.type, value: peekCard.value } : null
+      expression: currentExpression
     };
   }
 }
@@ -617,10 +629,12 @@ function isExpressionValid(stack) {
 }
 
 function advanceTurn(room) {
-  room.turnIndex += 1;
+  room.playedTurnsThisRound += 1;
+  room.turnIndex = (room.turnIndex + 1) % room.players.length;
 }
 
 function finishGame(room, reason) {
+  clearAnswerTimer(room);
   room.phase = "finished";
   room.winnerText = reason === computeWinnerText(room) ? reason : computeWinnerText(room);
   room.deckRemaining = room.deck.length;
@@ -688,6 +702,9 @@ function publicRoomState(room) {
     maxRounds: room.maxRounds,
     targetScore: room.targetScore,
     deckRemaining: room.deckRemaining,
+    answerDeadlineAt: room.answerDeadlineAt,
+    playedTurnsThisRound: room.playedTurnsThisRound,
+    totalTurnsThisRound: room.totalTurnsThisRound,
     expectedType: room.phase === "playing" ? expectedType(room) : null,
     hostPlayerId: room.hostPlayerId,
     responderPlayerId: responder ? responder.id : null,
@@ -939,4 +956,53 @@ function sendError(ws, message) {
     type: "error",
     message: message
   });
+}
+
+function enterAnswerPhase(room) {
+  clearAnswerTimer(room);
+  room.phase = "answer";
+  room.answerDeadlineAt = Date.now() + ANSWER_TIME_MS;
+  room.answerTimerId = setTimeout(() => {
+    handleAnswerTimeout(room);
+  }, ANSWER_TIME_MS);
+}
+
+function clearAnswerTimer(room) {
+  if (room.answerTimerId) {
+    clearTimeout(room.answerTimerId);
+    room.answerTimerId = null;
+  }
+  room.answerDeadlineAt = null;
+}
+
+function handleAnswerTimeout(room) {
+  if (room.phase !== "answer") {
+    return;
+  }
+
+  clearAnswerTimer(room);
+  const evaluation = evaluateExpression(room.stack);
+
+  room.lastResult = {
+    expression: evaluation.expression,
+    result: evaluation.value,
+    answer: "Tempo esgotado",
+    correct: false,
+    responderName: room.players[room.responderIndex] ? room.players[room.responderIndex].name : "-",
+    autoClosedRound: room.autoClosedRound,
+    basePoints: calculateComplexityPoints(evaluation.operatorCount),
+    awardedPoints: 0,
+    operatorCount: evaluation.operatorCount,
+    usedBonus: false,
+    finishReason: "O tempo de resposta de 60 segundos acabou."
+  };
+
+  if (room.pendingTargetWinnerId) {
+    finishGame(room, computeWinnerText(room));
+    return;
+  }
+
+  room.phase = "reveal";
+  room.deckRemaining = room.deck.length;
+  broadcastRoom(room);
 }
