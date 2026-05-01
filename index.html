@@ -290,6 +290,15 @@
       color: #f6fbff;
     }
 
+    .pile-card.special,
+    .hand-card.special,
+    .mini-card.special {
+      background:
+        radial-gradient(circle at 30% 18%, rgba(255, 255, 255, 0.24), transparent 24%),
+        linear-gradient(160deg, #7b3fe4, #41206e);
+      color: #fbf7ff;
+    }
+
     .pile-card.visible {
       z-index: 30;
     }
@@ -633,6 +642,32 @@
       background: rgba(240, 199, 96, 0.12);
       color: var(--text);
       font-weight: 800;
+    }
+
+    .peek-toast {
+      position: fixed;
+      left: 50%;
+      bottom: 22px;
+      transform: translateX(-50%);
+      z-index: 140;
+      width: min(360px, calc(100vw - 24px));
+      padding: 14px 16px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background:
+        linear-gradient(180deg, rgba(123, 63, 228, 0.25), rgba(65, 32, 110, 0.96)),
+        rgba(12, 18, 30, 0.96);
+      box-shadow: 0 18px 38px rgba(0, 0, 0, 0.42);
+      text-align: center;
+      line-height: 1.4;
+    }
+
+    .peek-toast strong {
+      display: block;
+      margin-top: 6px;
+      font-size: 24px;
+      color: #fff6c8;
+      letter-spacing: 0.04em;
     }
 
     .danger {
@@ -989,13 +1024,19 @@
     </div>
   </section>
 
+  <div id="peekToast" class="peek-toast hidden" aria-live="polite"></div>
+
   <script>
+    const DEFAULT_SERVER_URL = "wss://math-card-game.onrender.com";
+
     const appState = {
       socket: null,
       serverUrl: "",
       selectedPlayerCount: 2,
       device: "desktop",
       connectionState: "offline",
+      lastPeekId: null,
+      peekTimer: null,
       session: null,
       room: null,
       view: null
@@ -1022,6 +1063,7 @@
       revealRow: document.getElementById("revealRow"),
       resultLines: document.getElementById("resultLines"),
       winnerBox: document.getElementById("winnerBox"),
+      peekToast: document.getElementById("peekToast"),
       serverUrlInput: document.getElementById("serverUrlInput"),
       createNameInput: document.getElementById("createNameInput"),
       joinNameInput: document.getElementById("joinNameInput"),
@@ -1051,6 +1093,8 @@
         els.serverUrlInput.value = serverParam;
       } else if (location.protocol.startsWith("http") && !location.hostname.includes("github.io")) {
         els.serverUrlInput.value = location.origin.replace(/^http/, "ws");
+      } else {
+        els.serverUrlInput.value = DEFAULT_SERVER_URL;
       }
 
       document.querySelectorAll("#playerCountPick .toggle-btn").forEach((button) => {
@@ -1321,6 +1365,7 @@
       renderHand();
       renderAnswerBox();
       renderResult();
+      handleMemoryPeek();
       const info = appState.view.infoMessage || "Partida em andamento.";
       setMessage(info);
     }
@@ -1356,10 +1401,14 @@
         return;
       }
 
-      els.roundInfo.textContent = appState.room.round + " / " + appState.room.maxRounds;
+      els.roundInfo.textContent = appState.room.maxRounds ? (appState.room.round + " / " + appState.room.maxRounds) : String(appState.room.round);
       els.turnInfo.textContent = appState.room.turnPlayerName || "-";
       els.responderInfo.textContent = appState.room.responderPlayerName || "-";
-      els.expectedInfo.textContent = appState.room.phase === "playing" ? labelType(appState.room.expectedType) : "-";
+      if (appState.room.phase === "playing") {
+        els.expectedInfo.textContent = labelType(appState.room.expectedType) + " | cava " + appState.room.deckRemaining;
+      } else {
+        els.expectedInfo.textContent = "cava " + appState.room.deckRemaining;
+      }
     }
 
     function renderStack() {
@@ -1404,7 +1453,7 @@
         return;
       }
 
-      els.handHint.textContent = "Jogue um " + labelType(appState.room.expectedType) + ".";
+      els.handHint.textContent = "Jogue um " + labelType(appState.room.expectedType) + " ou use uma especial.";
       els.handZone.innerHTML = (appState.view.hand || []).map((card) => {
         const disabled = !card.playable || !appState.view.canPlay ? "disabled" : "";
         return '' +
@@ -1447,22 +1496,30 @@
       }
 
       const result = appState.room.lastResult;
-      if (!result) {
+      if (!result && appState.room.phase !== "finished") {
         els.resultOverlay.classList.add("hidden");
         return;
       }
 
-      els.resultTitle.textContent = result.correct ? "Resposta correta" : "Resposta incorreta";
       els.revealRow.innerHTML = (appState.view.stack || []).map((card) => miniCardMarkup(card)).join("");
-      els.resultLines.innerHTML = [
-        '<div>Expressao completa: <strong>' + escapeHtml(result.expression) + "</strong></div>",
-        '<div>Resultado real: <strong>' + formatNumber(result.result) + "</strong></div>",
-        '<div>Resposta dada: <strong>' + formatNumber(result.answer) + "</strong></div>",
-        result.correct
-          ? '<div><strong>+2 pontos</strong> para ' + escapeHtml(result.responderName) + ".</div>"
-          : "<div>Nenhum ponto nesta rodada.</div>",
-        result.autoClosedRound ? "<div>A cava fechou a rodada com a ultima carta.</div>" : ""
-      ].join("");
+
+      if (result) {
+        els.resultTitle.textContent = result.correct ? "Resposta correta" : "Resposta incorreta";
+        els.resultLines.innerHTML = [
+          '<div>Expressao completa: <strong>' + escapeHtml(result.expression) + "</strong></div>",
+          '<div>Resultado real: <strong>' + formatLooseValue(result.result) + "</strong></div>",
+          '<div>Resposta dada: <strong>' + formatLooseValue(result.answer) + "</strong></div>",
+          result.correct
+            ? '<div><strong>+' + result.awardedPoints + " ponto(s)</strong> para " + escapeHtml(result.responderName) + ".</div>"
+            : "<div>Nenhum ponto nesta rodada.</div>",
+          result.usedBonus ? "<div>A carta Bonus acrescentou +1 ponto extra.</div>" : "",
+          result.autoClosedRound ? "<div>A cava fechou a rodada com a ultima carta.</div>" : "",
+          result.finishReason ? "<div>" + escapeHtml(result.finishReason) + "</div>" : ""
+        ].join("");
+      } else {
+        els.resultTitle.textContent = "Fim de jogo";
+        els.resultLines.innerHTML = "<div>A partida terminou por esgotamento da cava.</div>";
+      }
 
       if (appState.room.phase === "finished" && appState.room.winnerText) {
         els.winnerBox.classList.remove("hidden");
@@ -1475,6 +1532,31 @@
       els.nextRoundButton.textContent = appState.room.phase === "finished" ? "Nova partida" : "Proxima rodada";
       els.nextRoundButton.disabled = !isHost();
       els.resultOverlay.classList.remove("hidden");
+    }
+
+    function handleMemoryPeek() {
+      if (!appState.view || !appState.view.memoryPeek) {
+        return;
+      }
+
+      const peek = appState.view.memoryPeek;
+      if (!peek.id || peek.id === appState.lastPeekId) {
+        return;
+      }
+
+      appState.lastPeekId = peek.id;
+      if (appState.peekTimer) {
+        clearTimeout(appState.peekTimer);
+      }
+
+      els.peekToast.innerHTML = peek.card
+        ? 'Memoria Extra ativada.<strong>' + printableValue(peek.card) + "</strong>"
+        : "Memoria Extra ativada.<strong>Sem carta abaixo do topo</strong>";
+      els.peekToast.classList.remove("hidden");
+
+      appState.peekTimer = setTimeout(() => {
+        els.peekToast.classList.add("hidden");
+      }, 3000);
     }
 
     function renderDisconnectedTable() {
@@ -1551,6 +1633,7 @@
     }
 
     function printableValue(card) {
+      if (card.type === "special") return specialLabel(card.value);
       if (card.type === "operator") return displayOperator(card.value);
       return String(card.value);
     }
@@ -1562,11 +1645,24 @@
     }
 
     function labelType(type) {
-      return type === "number" ? "numero" : "operador";
+      if (type === "number") return "numero";
+      if (type === "operator") return "operador";
+      return "especial";
     }
 
     function formatNumber(value) {
       return Number.isInteger(value) ? String(value) : String(Math.round((Number(value) + Number.EPSILON) * 10000) / 10000);
+    }
+
+    function formatLooseValue(value) {
+      return typeof value === "number" ? formatNumber(value) : String(value);
+    }
+
+    function specialLabel(kind) {
+      if (kind === "skip_response") return "Pular";
+      if (kind === "memory_extra") return "Memoria";
+      if (kind === "bonus") return "Bonus";
+      return "Especial";
     }
 
     function escapeHtml(value) {
