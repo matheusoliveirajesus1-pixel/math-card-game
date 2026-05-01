@@ -3,7 +3,7 @@ const crypto = require("crypto");
 const WebSocket = require("ws");
 
 const PORT = process.env.PORT || 3000;
-const HAND_SIZE = 3;
+const HAND_SIZE = 5;
 const TURNS_PER_PLAYER_PER_ROUND = 2;
 const ROOM_CODE_LENGTH = 6;
 const TARGET_SCORE = 10;
@@ -309,7 +309,7 @@ function playCard(ws, room, data) {
     room.discardPile.push(card);
     applySpecialCard(room, player, card);
   } else {
-    room.stack.push(card);
+    appendCardToStack(room, card);
   }
 
   topUpHand(room, player);
@@ -611,7 +611,12 @@ function isCardPlayable(room, player, card) {
     return true;
   }
 
-  return card.type === expectedType(room);
+  const expected = expectedType(room);
+  if (expected === "operator") {
+    return card.type === "operator" || card.type === "number";
+  }
+
+  return card.type === "number";
 }
 
 function isExpressionValid(stack) {
@@ -631,6 +636,14 @@ function isExpressionValid(stack) {
 function advanceTurn(room) {
   room.playedTurnsThisRound += 1;
   room.turnIndex = (room.turnIndex + 1) % room.players.length;
+}
+
+function appendCardToStack(room, card) {
+  const expected = expectedType(room);
+  if (expected === "operator" && card.type === "number") {
+    room.stack.push(makeCard("operator", "*", true));
+  }
+  room.stack.push(card);
 }
 
 function finishGame(room, reason) {
@@ -736,7 +749,8 @@ function privateView(room, player) {
     if (room.phase === "reveal" || room.phase === "finished") {
       return {
         type: card.type,
-        value: card.value
+        value: card.value,
+        autoInserted: !!card.autoInserted
       };
     }
 
@@ -747,7 +761,8 @@ function privateView(room, player) {
 
     return {
       type: card.type,
-      value: card.value
+      value: card.value,
+      autoInserted: !!card.autoInserted
     };
   });
 
@@ -773,7 +788,7 @@ function makeInfoMessage(room, player) {
   if (room.phase === "playing") {
     const current = room.players[room.turnIndex];
     if (current && current.id === player.id) {
-      return "Seu turno. Jogue uma carta valida ou use uma especial.";
+      return "Seu turno. Numeros sobre numeros viram multiplicacao automaticamente.";
     }
     return current ? current.name + " esta jogando agora." : "Aguardando turno.";
   }
@@ -821,7 +836,7 @@ function createDeck() {
     deck.push(makeCard("operator", "+"));
     deck.push(makeCard("operator", "-"));
     deck.push(makeCard("operator", "*"));
-    deck.push(makeCard("operator", "%"));
+    deck.push(makeCard("operator", "/"));
   }
 
   SPECIAL_CARDS.forEach((value) => {
@@ -831,11 +846,12 @@ function createDeck() {
   return deck;
 }
 
-function makeCard(type, value) {
+function makeCard(type, value, autoInserted) {
   return {
     id: createId(),
     type: type,
-    value: value
+    value: value,
+    autoInserted: !!autoInserted
   };
 }
 
@@ -853,7 +869,7 @@ function evaluateExpression(cards) {
     if (operator === "+") total += nextValue;
     if (operator === "-") total -= nextValue;
     if (operator === "*") total *= nextValue;
-    if (operator === "%") total %= nextValue;
+    if (operator === "/") total /= nextValue;
   }
 
   return {
