@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: pilha-matematica-online
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
