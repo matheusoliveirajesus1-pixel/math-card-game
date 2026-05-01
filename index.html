@@ -1557,7 +1557,7 @@
       }
 
       els.handHint.textContent = appState.room.expectedType === "operator"
-        ? "Operador, numero para multiplicar automaticamente, ou especial."
+        ? "Operador, numero para somar automaticamente, ou especial."
         : "Jogue um numero ou use uma especial.";
       els.handZone.innerHTML = (appState.view.hand || []).map((card) => {
         const disabled = !card.playable || !appState.view.canPlay ? "disabled" : "";
@@ -1782,7 +1782,7 @@
     }
 
     function formatNumber(value) {
-      return Number.isInteger(value) ? String(value) : String(Math.round((Number(value) + Number.EPSILON) * 10000) / 10000);
+      return Number.isInteger(value) ? String(value) : String(Math.round((Number(value) + Number.EPSILON) * 10) / 10);
     }
 
     function formatLooseValue(value) {
