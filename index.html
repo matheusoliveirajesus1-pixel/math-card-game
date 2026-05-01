@@ -123,6 +123,7 @@
       box-shadow:
         0 22px 42px rgba(0, 0, 0, 0.5),
         inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      animation: active-pulse 1.6s ease-in-out infinite;
     }
 
     .score-card.responder {
@@ -301,6 +302,7 @@
 
     .pile-card.visible {
       z-index: 30;
+      animation: stack-pop 320ms cubic-bezier(.2,.8,.2,1);
     }
 
     .pile-card.reveal {
@@ -328,11 +330,47 @@
       text-shadow: 0 1px 0 rgba(255, 255, 255, 0.1);
     }
 
+    .auto-tag {
+      position: absolute;
+      right: 8px;
+      top: 8px;
+      min-height: 20px;
+      padding: 0 7px;
+      border-radius: 999px;
+      background: rgba(255, 220, 125, 0.16);
+      color: #ffeeb9;
+      border: 1px solid rgba(255, 220, 125, 0.25);
+      font-size: 10px;
+      font-weight: 800;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
     .answer-box {
       width: min(360px, 100%);
       padding: 16px;
       display: grid;
       gap: 10px;
+    }
+
+    .answer-timer {
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 8px;
+      background:
+        linear-gradient(180deg, rgba(255, 220, 125, 0.18), rgba(255, 220, 125, 0.08)),
+        rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 220, 125, 0.24);
+      color: #fff1bd;
+      font-size: 26px;
+      font-weight: 900;
+      letter-spacing: 0.04em;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
     }
 
     .answer-box label {
@@ -454,6 +492,7 @@
         0 18px 28px rgba(0, 0, 0, 0.3),
         inset 0 1px 0 rgba(255, 255, 255, 0.08);
       transition: transform 160ms ease, opacity 160ms ease, filter 160ms ease, box-shadow 160ms ease;
+      animation: hand-rise 260ms cubic-bezier(.2,.8,.2,1);
     }
 
     .hand-card .card-value {
@@ -676,6 +715,40 @@
 
     .hidden {
       display: none !important;
+    }
+
+    @keyframes active-pulse {
+      0%, 100% {
+        box-shadow:
+          0 22px 42px rgba(0, 0, 0, 0.5),
+          inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      }
+      50% {
+        box-shadow:
+          0 26px 46px rgba(0, 0, 0, 0.56),
+          0 0 0 1px rgba(105, 216, 170, 0.22),
+          inset 0 1px 0 rgba(255, 255, 255, 0.12);
+      }
+    }
+
+    @keyframes stack-pop {
+      0% {
+        opacity: 0;
+        transform: translateY(18px) scale(0.9);
+      }
+      100% {
+        opacity: 1;
+      }
+    }
+
+    @keyframes hand-rise {
+      0% {
+        opacity: 0;
+        transform: translateY(14px) scale(0.94);
+      }
+      100% {
+        opacity: 1;
+      }
     }
 
     body[data-device="mobile"] .app {
@@ -910,6 +983,7 @@
 
         <div class="answer-zone">
           <form id="answerForm" class="answer-box hidden">
+            <div id="answerTimerBox" class="answer-timer">60s</div>
             <label id="answerLabel" for="answerInput">Resposta</label>
             <div class="answer-row">
               <input id="answerInput" type="number" step="0.0001" inputmode="decimal" autocomplete="off">
@@ -1053,6 +1127,7 @@
       messageBar: document.getElementById("messageBar"),
       stackZone: document.getElementById("stackZone"),
       answerForm: document.getElementById("answerForm"),
+      answerTimerBox: document.getElementById("answerTimerBox"),
       answerLabel: document.getElementById("answerLabel"),
       answerInput: document.getElementById("answerInput"),
       currentPlayer: document.getElementById("currentPlayer"),
@@ -1371,7 +1446,13 @@
       renderAnswerBox();
       renderResult();
       handleMemoryPeek();
-      const info = appState.view.infoMessage || "Partida em andamento.";
+      let info = appState.view.infoMessage || "Partida em andamento.";
+      if (appState.room.phase === "answer") {
+        const timerText = getAnswerTimerText();
+        if (timerText) {
+          info += " Tempo restante: " + timerText + ".";
+        }
+      }
       setMessage(info);
     }
 
@@ -1463,7 +1544,9 @@
         return;
       }
 
-      els.handHint.textContent = "Jogue um " + labelType(appState.room.expectedType) + " ou use uma especial.";
+      els.handHint.textContent = appState.room.expectedType === "operator"
+        ? "Operador, numero para multiplicar automaticamente, ou especial."
+        : "Jogue um numero ou use uma especial.";
       els.handZone.innerHTML = (appState.view.hand || []).map((card) => {
         const disabled = !card.playable || !appState.view.canPlay ? "disabled" : "";
         return '' +
@@ -1489,6 +1572,7 @@
       if (appState.room.phase === "answer" && appState.view.canAnswer) {
         els.answerForm.classList.remove("hidden");
         els.answerLabel.textContent = appState.view.you.name + ", qual e o resultado?";
+        els.answerTimerBox.textContent = getAnswerTimerText() || "60s";
       } else {
         els.answerForm.classList.add("hidden");
       }
@@ -1624,12 +1708,26 @@
     function renderAnswerTimer() {
       if (!appState.room || appState.room.phase !== "answer" || !appState.room.answerDeadlineAt) {
         els.answerTimerInfo.textContent = "-";
+        if (els.answerTimerBox) {
+          els.answerTimerBox.textContent = "-";
+        }
         return;
       }
 
+      const timerText = getAnswerTimerText();
+      els.answerTimerInfo.textContent = timerText;
+      if (els.answerTimerBox) {
+        els.answerTimerBox.textContent = timerText;
+      }
+    }
+
+    function getAnswerTimerText() {
+      if (!appState.room || appState.room.phase !== "answer" || !appState.room.answerDeadlineAt) {
+        return "";
+      }
       const remainingMs = Math.max(0, appState.room.answerDeadlineAt - Date.now());
       const seconds = Math.ceil(remainingMs / 1000);
-      els.answerTimerInfo.textContent = seconds + "s";
+      return seconds + "s";
     }
 
     function setConnectStatus(text) {
@@ -1644,6 +1742,7 @@
       return '' +
         '<div class="' + className + '" style="' + style + '">' +
           '<span class="card-kind">' + labelType(card.type) + "</span>" +
+          (card.autoInserted ? '<span class="auto-tag">auto</span>' : "") +
           '<span class="card-value">' + printableValue(card) + "</span>" +
         "</div>";
     }
