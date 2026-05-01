@@ -641,7 +641,7 @@ function advanceTurn(room) {
 function appendCardToStack(room, card) {
   const expected = expectedType(room);
   if (expected === "operator" && card.type === "number") {
-    room.stack.push(makeCard("operator", "*", true));
+    room.stack.push(makeCard("operator", "+", true));
   }
   room.stack.push(card);
 }
@@ -788,7 +788,7 @@ function makeInfoMessage(room, player) {
   if (room.phase === "playing") {
     const current = room.players[room.turnIndex];
     if (current && current.id === player.id) {
-      return "Seu turno. Numeros sobre numeros viram multiplicacao automaticamente.";
+      return "Seu turno. Numeros sobre numeros viram soma automaticamente.";
     }
     return current ? current.name + " esta jogando agora." : "Aguardando turno.";
   }
@@ -959,7 +959,7 @@ function specialLabel(kind) {
 }
 
 function normalizeNumber(value) {
-  return Math.round((Number(value) + Number.EPSILON) * 10000) / 10000;
+  return Math.round((Number(value) + Number.EPSILON) * 10) / 10;
 }
 
 function sendToSocket(ws, payload) {
