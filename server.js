@@ -8,6 +8,7 @@ const TURNS_PER_PLAYER_PER_ROUND = 2;
 const ROOM_CODE_LENGTH = 6;
 const TARGET_SCORE = 10;
 const ANSWER_TIME_MS = 60000;
+const AUTO_CLOSE_PREVIEW_MS = 10000;
 const EPSILON = 0.0001;
 
 const NUMBER_VALUES = [
@@ -150,6 +151,7 @@ function createRoom(ws, data) {
     pendingTargetWinnerId: null,
     answerDeadlineAt: null,
     answerTimerId: null,
+    autoClosePreviewTimerId: null,
     playedTurnsThisRound: 0,
     totalTurnsThisRound: 0,
     finalAutoClosePreview: null
@@ -262,6 +264,7 @@ function startRound(room) {
 
 function resetRoundState(room) {
   room.phase = "playing";
+  clearAutoClosePreviewTimer(room);
   room.turnIndex = 0;
   room.responderIndex = (room.round - 1) % room.players.length;
   room.stack = [];
@@ -405,6 +408,19 @@ function finishPlayPhase(room) {
       }
     };
     room.stack.push(closingCard);
+    room.phase = "auto_close_preview";
+    clearAutoClosePreviewTimer(room);
+    room.autoClosePreviewTimerId = setTimeout(() => {
+      if (room.phase !== "auto_close_preview") {
+        return;
+      }
+      enterAnswerPhase(room);
+      room.deckRemaining = room.deck.length;
+      broadcastRoom(room);
+    }, AUTO_CLOSE_PREVIEW_MS);
+    room.deckRemaining = room.deck.length;
+    broadcastRoom(room);
+    return;
   }
 
   enterAnswerPhase(room);
@@ -526,6 +542,7 @@ function removePlayer(ws, room) {
 
   room.phase = "lobby";
   clearAnswerTimer(room);
+  clearAutoClosePreviewTimer(room);
   room.round = 1;
   room.turnIndex = 0;
   room.responderIndex = 0;
@@ -665,6 +682,7 @@ function appendCardToStack(room, card) {
 
 function finishGame(room, reason) {
   clearAnswerTimer(room);
+  clearAutoClosePreviewTimer(room);
   room.phase = "finished";
   room.winnerText = reason === computeWinnerText(room) ? reason : computeWinnerText(room);
   room.deckRemaining = room.deck.length;
@@ -817,6 +835,10 @@ function makeInfoMessage(room, player) {
       return "Sua vez de responder o resultado da expressao.";
     }
     return responder ? responder.name + " esta respondendo de memoria." : "Aguardando resposta.";
+  }
+
+  if (room.phase === "auto_close_preview") {
+    return "Fechamento automatico da rodada. Memorize as duas cartas finais.";
   }
 
   if (room.phase === "reveal") {
@@ -994,6 +1016,7 @@ function sendError(ws, message) {
 
 function enterAnswerPhase(room) {
   clearAnswerTimer(room);
+  clearAutoClosePreviewTimer(room);
   room.phase = "answer";
   room.answerDeadlineAt = Date.now() + ANSWER_TIME_MS;
   room.answerTimerId = setTimeout(() => {
@@ -1007,6 +1030,13 @@ function clearAnswerTimer(room) {
     room.answerTimerId = null;
   }
   room.answerDeadlineAt = null;
+}
+
+function clearAutoClosePreviewTimer(room) {
+  if (room.autoClosePreviewTimerId) {
+    clearTimeout(room.autoClosePreviewTimerId);
+    room.autoClosePreviewTimerId = null;
+  }
 }
 
 function handleAnswerTimeout(room) {
