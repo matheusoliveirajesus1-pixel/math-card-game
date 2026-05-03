@@ -380,6 +380,27 @@
       text-shadow: 0 1px 0 rgba(255, 255, 255, 0.1);
     }
 
+    .card-value.compact {
+      max-width: 92%;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      text-align: center;
+      line-height: 1.08;
+    }
+
+    .hand-card .card-value.compact {
+      font-size: 30px;
+    }
+
+    .pile-card .card-value.compact {
+      font-size: 34px;
+    }
+
+    .pile-card.reveal .card-value.compact {
+      font-size: 22px;
+    }
+
     .auto-tag {
       position: absolute;
       right: 8px;
@@ -712,6 +733,18 @@
       box-shadow:
         0 12px 20px rgba(0, 0, 0, 0.24),
         inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      overflow: hidden;
+      text-align: center;
+      padding: 4px;
+    }
+
+    .mini-card .card-value {
+      font-size: 24px;
+      font-weight: 900;
+      line-height: 1.05;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .result-lines {
@@ -928,6 +961,10 @@
 
     body[data-device="mobile"] .hand-card .card-value {
       font-size: 32px;
+    }
+
+    body[data-device="mobile"] .hand-card .card-value.compact {
+      font-size: 22px;
     }
 
     body[data-device="mobile"] .overlay {
@@ -1224,8 +1261,6 @@
       lobbyMessage: document.getElementById("lobbyMessage"),
       nextRoundButton: document.getElementById("nextRoundButton")
     };
-
-    bootstrap();
 
     function bootstrap() {
       applyDeviceMode();
@@ -1654,7 +1689,7 @@
         return '' +
           '<button class="hand-card ' + card.type + '" type="button" data-card-id="' + card.id + '" ' + disabled + ' aria-label="Carta ' + printableValue(card) + '">' +
             '<span class="card-kind">' + labelType(card.type) + "</span>" +
-            '<span class="card-value">' + printableValue(card) + "</span>" +
+            '<span class="' + valueClass(card) + '">' + printableValue(card) + "</span>" +
           "</button>";
       }).join("");
 
@@ -2029,12 +2064,18 @@
         '<div class="' + className + '" style="' + style + '">' +
           '<span class="card-kind">' + labelType(card.type) + "</span>" +
           (card.autoInserted ? '<span class="auto-tag">auto</span>' : "") +
-          '<span class="card-value">' + printableValue(card) + "</span>" +
+          '<span class="' + valueClass(card) + '">' + printableValue(card) + "</span>" +
         "</div>";
     }
 
     function miniCardMarkup(card) {
-      return '<div class="mini-card ' + card.type + '">' + printableValue(card) + "</div>";
+      return '<div class="mini-card ' + card.type + '"><span class="' + valueClass(card) + '">' + printableValue(card) + "</span></div>";
+    }
+
+    function valueClass(card) {
+      const value = printableValue(card);
+      const needsCompact = card.type === "special" || String(value).length > 2;
+      return needsCompact ? "card-value compact" : "card-value";
     }
 
     function printableValue(card) {
@@ -2078,6 +2119,8 @@
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#39;");
     }
+
+    bootstrap();
   </script>
 </body>
 </html>
