@@ -169,6 +169,30 @@
       text-align: right;
     }
 
+    .audio-toggle {
+      margin-top: 10px;
+      width: 100%;
+      height: 34px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.04);
+      color: #d4e6f7;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: filter 180ms ease, transform 120ms ease;
+    }
+
+    .audio-toggle:hover {
+      filter: brightness(1.15);
+    }
+
+    .audio-toggle:active {
+      transform: translateY(1px);
+    }
+
     .table {
       min-height: 640px;
       display: grid;
@@ -1006,6 +1030,7 @@
         <div class="status-row"><span>Respondedor</span><strong id="responderInfo">-</strong></div>
         <div class="status-row"><span>Tempo</span><strong id="answerTimerInfo">-</strong></div>
         <div class="status-row"><span>Proxima carta</span><strong id="expectedInfo">-</strong></div>
+        <button id="audioToggleButton" class="audio-toggle" type="button">Som: off</button>
       </aside>
     </section>
 
@@ -1150,6 +1175,8 @@
       connectionState: "offline",
       lastPeekId: null,
       peekTimer: null,
+      prevPhase: null,
+      prevScores: {},
       session: null,
       room: null,
       view: null
@@ -1162,6 +1189,7 @@
       responderInfo: document.getElementById("responderInfo"),
       answerTimerInfo: document.getElementById("answerTimerInfo"),
       expectedInfo: document.getElementById("expectedInfo"),
+      audioToggleButton: document.getElementById("audioToggleButton"),
       messageBar: document.getElementById("messageBar"),
       stackZone: document.getElementById("stackZone"),
       answerForm: document.getElementById("answerForm"),
@@ -1201,6 +1229,7 @@
 
     function bootstrap() {
       applyDeviceMode();
+      initAudio();
       window.addEventListener("resize", applyDeviceMode);
       window.setInterval(() => {
         renderAnswerTimer();
@@ -1230,10 +1259,12 @@
       });
 
       els.createRoomButton.addEventListener("click", () => {
+        Audio.play("ui");
         createRoom();
       });
 
       els.joinRoomButton.addEventListener("click", () => {
+        Audio.play("ui");
         joinRoom();
       });
 
@@ -1249,10 +1280,12 @@
       });
 
       els.startMatchButton.addEventListener("click", () => {
+        Audio.play("start");
         send("start_game");
       });
 
       els.leaveRoomButton.addEventListener("click", () => {
+        Audio.play("ui");
         leaveRoom();
       });
 
@@ -1268,11 +1301,17 @@
           setMessage("A resposta precisa ser numerica.");
           return;
         }
+        Audio.play("submit");
         send("submit_answer", { answer: answer });
       });
 
       els.nextRoundButton.addEventListener("click", () => {
+        Audio.play("ui");
         send("next_round");
+      });
+
+      els.audioToggleButton.addEventListener("click", () => {
+        Audio.toggle();
       });
 
       renderDisconnectedTable();
@@ -1433,6 +1472,7 @@
       if (payload.type === "room_state") {
         appState.room = payload.room;
         appState.view = payload.view;
+        processAudioState();
         renderRoom();
         return;
       }
@@ -1620,6 +1660,7 @@
 
       els.handZone.querySelectorAll(".hand-card").forEach((button) => {
         button.addEventListener("click", () => {
+          Audio.play("card");
           send("play_card", { cardId: button.dataset.cardId });
         });
       });
@@ -1799,6 +1840,189 @@
     function setLobbyMessage(text) {
       els.lobbyMessage.textContent = text;
     }
+
+    function processAudioState() {
+      if (!appState.room || !appState.view) return;
+
+      const phase = appState.room.phase;
+      const oldPhase = appState.prevPhase;
+      const myId = appState.view.you.id;
+
+      if (phase !== oldPhase) {
+        if (phase === "playing" && oldPhase === "lobby") {
+          Audio.play("start");
+        } else if (phase === "answer") {
+          Audio.play("alert");
+        } else if (phase === "reveal" || phase === "finished") {
+          const result = appState.room.lastResult;
+          if (result && result.correct) {
+            Audio.play("good");
+          } else if (result) {
+            Audio.play("bad");
+          }
+        }
+      }
+
+      const myScore = getPlayerScore(myId);
+      const prevMyScore = appState.prevScores[myId] || 0;
+      if (myScore > prevMyScore) {
+        Audio.play("point");
+      }
+
+      appState.prevScores = {};
+      appState.room.players.forEach((player) => {
+        appState.prevScores[player.id] = player.score;
+      });
+      appState.prevPhase = phase;
+    }
+
+    function getPlayerScore(playerId) {
+      if (!appState.room || !Array.isArray(appState.room.players)) return 0;
+      const entry = appState.room.players.find((player) => player.id === playerId);
+      return entry ? entry.score : 0;
+    }
+
+    function initAudio() {
+      Audio.bindToggleButton(els.audioToggleButton);
+      const unlockOnFirstInteraction = () => {
+        Audio.unlock();
+        window.removeEventListener("pointerdown", unlockOnFirstInteraction);
+        window.removeEventListener("keydown", unlockOnFirstInteraction);
+      };
+      window.addEventListener("pointerdown", unlockOnFirstInteraction);
+      window.addEventListener("keydown", unlockOnFirstInteraction);
+    }
+
+    const Audio = (() => {
+      let context = null;
+      let enabled = false;
+      let unlocked = false;
+      let toggleButton = null;
+      let musicTimer = null;
+      let musicStep = 0;
+      const musicPattern = [261.63, 329.63, 392, 329.63, 293.66, 349.23, 440, 349.23];
+
+      function ensureContext() {
+        if (!context) {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          if (!Ctx) return null;
+          context = new Ctx();
+        }
+        return context;
+      }
+
+      function updateToggleLabel() {
+        if (!toggleButton) return;
+        toggleButton.textContent = enabled ? "Som: on" : "Som: off";
+      }
+
+      function unlock() {
+        const ctx = ensureContext();
+        if (!ctx) return;
+        if (ctx.state === "suspended") {
+          ctx.resume();
+        }
+        unlocked = true;
+      }
+
+      function bindToggleButton(button) {
+        toggleButton = button;
+        updateToggleLabel();
+      }
+
+      function toggle() {
+        enabled = !enabled;
+        updateToggleLabel();
+        if (!enabled) {
+          stopMusic();
+          return;
+        }
+        unlock();
+        play("ui");
+        startMusic();
+      }
+
+      function startMusic() {
+        stopMusic();
+        if (!enabled) return;
+        musicStep = 0;
+        musicTimer = setInterval(() => {
+          if (!enabled) return;
+          playTone(musicPattern[musicStep % musicPattern.length], 0.16, 0.02, "triangle");
+          musicStep += 1;
+        }, 420);
+      }
+
+      function stopMusic() {
+        if (musicTimer) {
+          clearInterval(musicTimer);
+          musicTimer = null;
+        }
+      }
+
+      function playTone(frequency, duration, volume, waveform) {
+        const ctx = ensureContext();
+        if (!ctx || !enabled || !unlocked) return;
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = waveform || "sine";
+        osc.frequency.setValueAtTime(frequency, now);
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(Math.max(volume, 0.0001), now + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + duration + 0.03);
+      }
+
+      function play(kind) {
+        if (!enabled) return;
+        if (kind === "card") {
+          playTone(460, 0.08, 0.04, "square");
+          return;
+        }
+        if (kind === "ui") {
+          playTone(560, 0.07, 0.028, "triangle");
+          return;
+        }
+        if (kind === "submit") {
+          playTone(700, 0.08, 0.036, "triangle");
+          return;
+        }
+        if (kind === "start") {
+          playTone(392, 0.08, 0.04, "triangle");
+          setTimeout(() => playTone(523.25, 0.12, 0.045, "triangle"), 80);
+          return;
+        }
+        if (kind === "alert") {
+          playTone(740, 0.08, 0.04, "sawtooth");
+          return;
+        }
+        if (kind === "point") {
+          playTone(660, 0.08, 0.04, "triangle");
+          setTimeout(() => playTone(880, 0.1, 0.05, "triangle"), 90);
+          return;
+        }
+        if (kind === "good") {
+          playTone(523.25, 0.08, 0.04, "triangle");
+          setTimeout(() => playTone(659.25, 0.1, 0.045, "triangle"), 80);
+          setTimeout(() => playTone(783.99, 0.13, 0.05, "triangle"), 170);
+          return;
+        }
+        if (kind === "bad") {
+          playTone(220, 0.16, 0.05, "sawtooth");
+        }
+      }
+
+      return {
+        bindToggleButton: bindToggleButton,
+        toggle: toggle,
+        unlock: unlock,
+        play: play
+      };
+    })();
 
     function stackCardMarkup(card, className, style) {
       return '' +
