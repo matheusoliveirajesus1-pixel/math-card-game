@@ -151,7 +151,8 @@ function createRoom(ws, data) {
     answerDeadlineAt: null,
     answerTimerId: null,
     playedTurnsThisRound: 0,
-    totalTurnsThisRound: 0
+    totalTurnsThisRound: 0,
+    finalAutoClosePreview: null
   };
 
   rooms.set(roomCode, room);
@@ -270,6 +271,7 @@ function resetRoundState(room) {
   room.answerDeadlineAt = null;
   room.playedTurnsThisRound = 0;
   room.totalTurnsThisRound = room.players.length * TURNS_PER_PLAYER_PER_ROUND;
+  room.finalAutoClosePreview = null;
 
   room.players.forEach((player) => {
     player.bonusArmed = false;
@@ -382,12 +384,26 @@ function handleDeadTurn(room, player) {
 
 function finishPlayPhase(room) {
   if (expectedType(room) === "number") {
+    const player = room.players[(room.turnIndex - 1 + room.players.length) % room.players.length] || null;
+    const lastPlayerCard = room.stack.length ? room.stack[room.stack.length - 1] : null;
     const closingCard = drawCard(room, (card) => card.type === "number");
     if (!closingCard) {
       finishGame(room, "A cava acabou e nao foi possivel fechar a expressao da rodada.");
       return;
     }
     room.autoClosedRound = true;
+    room.finalAutoClosePreview = {
+      playerName: player ? player.name : null,
+      playerCard: lastPlayerCard ? {
+        type: lastPlayerCard.type,
+        value: lastPlayerCard.value
+      } : null,
+      autoCard: {
+        type: closingCard.type,
+        value: closingCard.value,
+        autoInserted: true
+      }
+    };
     room.stack.push(closingCard);
   }
 
@@ -509,6 +525,7 @@ function removePlayer(ws, room) {
   });
 
   room.phase = "lobby";
+  clearAnswerTimer(room);
   room.round = 1;
   room.turnIndex = 0;
   room.responderIndex = 0;
@@ -732,7 +749,8 @@ function publicRoomState(room) {
     })),
     lastResult: room.lastResult,
     winnerText: room.winnerText,
-    consecutiveDeadTurns: room.consecutiveDeadTurns
+    consecutiveDeadTurns: room.consecutiveDeadTurns,
+    finalAutoClosePreview: room.finalAutoClosePreview
   };
 }
 
