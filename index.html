@@ -312,6 +312,32 @@
       transform: none;
     }
 
+    .auto-close-preview {
+      display: grid;
+      gap: 10px;
+      justify-items: center;
+    }
+
+    .auto-close-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+    }
+
+    .auto-close-sep {
+      opacity: 0.72;
+      font-weight: 900;
+      font-size: 26px;
+      color: #d7e6f4;
+    }
+
+    .auto-close-caption {
+      font-size: 12px;
+      opacity: 0.84;
+      text-align: center;
+    }
+
     .card-kind {
       position: absolute;
       left: 10px;
@@ -1305,6 +1331,13 @@
         });
 
         socket.addEventListener("close", () => {
+          if (!settled) {
+            settled = true;
+            reject(new Error("socket-closed-before-open"));
+          }
+          if (appState.socket !== socket) {
+            return;
+          }
           appState.connectionState = "offline";
           appState.socket = null;
           appState.session = null;
@@ -1521,6 +1554,23 @@
       }
 
       const cards = appState.view.stack || [];
+      const preview = appState.room.finalAutoClosePreview || null;
+      if (appState.room.phase === "answer" && preview && preview.playerCard && preview.autoCard) {
+        const playerCard = stackCardMarkup(preview.playerCard, "pile-card reveal " + preview.playerCard.type, "");
+        const autoCard = stackCardMarkup(preview.autoCard, "pile-card reveal " + preview.autoCard.type, "");
+        const playerName = preview.playerName ? escapeHtml(preview.playerName) : "Jogador";
+        els.stackZone.innerHTML = '' +
+          '<div class="auto-close-preview">' +
+            '<div class="auto-close-row">' +
+              playerCard +
+              '<span class="auto-close-sep">&rarr;</span>' +
+              autoCard +
+            "</div>" +
+            '<div class="auto-close-caption">' + playerName + ' finalizou em operador, entao o jogo completou com carta automatica.</div>' +
+          "</div>";
+        return;
+      }
+
       if (appState.room.phase === "reveal" || appState.room.phase === "finished") {
         els.stackZone.innerHTML = cards.map((card) => {
           return stackCardMarkup(card, "pile-card reveal " + card.type, "");
@@ -1770,7 +1820,7 @@
     }
 
     function displayOperator(operator) {
-      if (operator === "x") return "\u00d7";
+      if (operator === "*") return "\u00d7";
       if (operator === "/") return "\u00f7";
       return operator;
     }
