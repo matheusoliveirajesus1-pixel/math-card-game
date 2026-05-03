@@ -1555,7 +1555,7 @@
 
       const cards = appState.view.stack || [];
       const preview = appState.room.finalAutoClosePreview || null;
-      if (appState.room.phase === "answer" && preview && preview.playerCard && preview.autoCard) {
+      if ((appState.room.phase === "auto_close_preview" || appState.room.phase === "answer") && preview && preview.playerCard && preview.autoCard) {
         const playerCard = stackCardMarkup(preview.playerCard, "pile-card reveal " + preview.playerCard.type, "");
         const autoCard = stackCardMarkup(preview.autoCard, "pile-card reveal " + preview.autoCard.type, "");
         const playerName = preview.playerName ? escapeHtml(preview.playerName) : "Jogador";
@@ -1601,7 +1601,7 @@
       els.currentPlayer.textContent = you.name;
 
       if (appState.room.phase !== "playing") {
-        els.handHint.textContent = appState.room.phase === "answer" ? "Aguardando resposta" : "";
+        els.handHint.textContent = (appState.room.phase === "answer" || appState.room.phase === "auto_close_preview") ? "Aguardando resposta" : "";
         els.handZone.innerHTML = "";
         return;
       }
