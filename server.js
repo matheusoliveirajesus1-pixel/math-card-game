@@ -8,7 +8,6 @@ const TURNS_PER_PLAYER_PER_ROUND = 2;
 const ROOM_CODE_LENGTH = 6;
 const TARGET_SCORE = 10;
 const ANSWER_TIME_MS = 60000;
-const AUTO_CLOSE_PREVIEW_MS = 10000;
 const EPSILON = 0.0001;
 
 const NUMBER_VALUES = [
@@ -177,7 +176,7 @@ function joinRoom(ws, data) {
     return;
   }
 
-  if (room.players.length >= room.playerCount) {
+  if (room.players.length >= room.playerCount + 1) {
     sendError(ws, "A sala ja esta cheia.");
     return;
   }
@@ -200,8 +199,8 @@ function updateSettings(ws, room, data) {
   }
 
   const playerCount = clampPlayerCount(data.playerCount);
-  if (playerCount < room.players.length) {
-    sendError(ws, "Nao e possivel reduzir abaixo do numero atual de jogadores.");
+  if (playerCount < room.players.length - 1) {
+    sendError(ws, "Nao e possivel reduzir abaixo do numero atual de jogadores ativos.");
     return;
   }
 
@@ -220,7 +219,7 @@ function startGame(ws, room) {
     return;
   }
 
-  if (room.players.length !== room.playerCount) {
+  if (getActivePlayers(room).length !== room.playerCount) {
     sendError(ws, "A sala precisa estar completa antes de iniciar.");
     return;
   }
@@ -232,6 +231,7 @@ function startGame(ws, room) {
   room.winnerText = "";
   room.pendingTargetWinnerId = null;
   clearAnswerTimer(room);
+  clearAutoClosePreviewTimer(room);
 
   room.players.forEach((player) => {
     player.score = 0;
@@ -245,6 +245,10 @@ function startGame(ws, room) {
 
 function startRound(room) {
   resetRoundState(room);
+  if (getActivePlayers(room).length < 2) {
+    finishGame(room, "Nao ha jogadores suficientes para a partida.");
+    return;
+  }
 
   const initialCard = drawCard(room, (card) => card.type === "number");
   if (!initialCard) {
@@ -263,17 +267,17 @@ function startRound(room) {
 }
 
 function resetRoundState(room) {
+  const activePlayers = getActivePlayers(room);
   room.phase = "playing";
-  clearAutoClosePreviewTimer(room);
   room.turnIndex = 0;
-  room.responderIndex = (room.round - 1) % room.players.length;
+  room.responderIndex = activePlayers.length ? (room.round - 1) % activePlayers.length : 0;
   room.stack = [];
   room.autoClosedRound = false;
   room.lastResult = null;
   room.consecutiveDeadTurns = 0;
   room.answerDeadlineAt = null;
   room.playedTurnsThisRound = 0;
-  room.totalTurnsThisRound = room.players.length * TURNS_PER_PLAYER_PER_ROUND;
+  room.totalTurnsThisRound = activePlayers.length * TURNS_PER_PLAYER_PER_ROUND;
   room.finalAutoClosePreview = null;
 
   room.players.forEach((player) => {
@@ -289,7 +293,7 @@ function playCard(ws, room, data) {
   }
 
   const player = getPlayerBySocket(ws, room);
-  const currentPlayer = room.players[room.turnIndex];
+  const currentPlayer = getCurrentTurnPlayer(room);
   if (!player || !currentPlayer || player.id !== currentPlayer.id) {
     sendError(ws, "Nao e o seu turno.");
     return;
@@ -341,7 +345,7 @@ function processForcedTurns(room) {
       break;
     }
 
-    const player = room.players[room.turnIndex];
+    const player = getCurrentTurnPlayer(room);
     if (!player) {
       break;
     }
@@ -369,12 +373,12 @@ function handleDeadTurn(room, player) {
 
   room.consecutiveDeadTurns += 1;
 
-    if (room.consecutiveDeadTurns >= room.players.length) {
-      if (isExpressionValid(room.stack)) {
-        enterAnswerPhase(room);
-      } else {
-        finishGame(room, "A rodada travou e a cava nao conseguiu fechar uma expressao valida.");
-      }
+  if (room.consecutiveDeadTurns >= getActivePlayers(room).length) {
+    if (isExpressionValid(room.stack)) {
+      enterAnswerPhase(room);
+    } else {
+      finishGame(room, "A rodada travou e a cava nao conseguiu fechar uma expressao valida.");
+    }
     return;
   }
 
@@ -387,7 +391,10 @@ function handleDeadTurn(room, player) {
 
 function finishPlayPhase(room) {
   if (expectedType(room) === "number") {
-    const player = room.players[(room.turnIndex - 1 + room.players.length) % room.players.length] || null;
+    const activePlayers = getActivePlayers(room);
+    const player = activePlayers.length
+      ? activePlayers[(room.turnIndex - 1 + activePlayers.length) % activePlayers.length]
+      : null;
     const lastPlayerCard = room.stack.length ? room.stack[room.stack.length - 1] : null;
     const closingCard = drawCard(room, (card) => card.type === "number");
     if (!closingCard) {
@@ -401,25 +408,20 @@ function finishPlayPhase(room) {
         type: lastPlayerCard.type,
         value: lastPlayerCard.value
       } : null,
-      autoCard: {
+      deckCard: {
         type: closingCard.type,
-        value: closingCard.value,
-        autoInserted: true
+        value: closingCard.value
       }
     };
-    room.stack.push(closingCard);
     room.phase = "auto_close_preview";
-    clearAutoClosePreviewTimer(room);
     room.autoClosePreviewTimerId = setTimeout(() => {
-      if (room.phase !== "auto_close_preview") {
-        return;
-      }
-      enterAnswerPhase(room);
+      room.autoClosePreviewTimerId = null;
+      room.stack.push(closingCard);
+      room.finalAutoClosePreview = null;
       room.deckRemaining = room.deck.length;
+      enterAnswerPhase(room);
       broadcastRoom(room);
-    }, AUTO_CLOSE_PREVIEW_MS);
-    room.deckRemaining = room.deck.length;
-    broadcastRoom(room);
+    }, 3000);
     return;
   }
 
@@ -432,7 +434,7 @@ function submitAnswer(ws, room, data) {
     return;
   }
 
-  const responder = room.players[room.responderIndex];
+  const responder = getResponderPlayer(room);
   const player = getPlayerBySocket(ws, room);
   if (!player || !responder || player.id !== responder.id) {
     sendError(ws, "So o respondedor pode enviar a resposta.");
@@ -568,8 +570,9 @@ function handleDisconnect(ws) {
 
 function applySpecialCard(room, player, card) {
   if (card.value === "skip_response") {
+    const activePlayers = getActivePlayers(room);
     player.score += 1;
-    room.responderIndex = (room.responderIndex + 1) % room.players.length;
+    room.responderIndex = activePlayers.length ? (room.responderIndex + 1) % activePlayers.length : 0;
     if (player.score >= room.targetScore) {
       room.pendingTargetWinnerId = player.id;
     }
@@ -591,6 +594,11 @@ function applySpecialCard(room, player, card) {
 }
 
 function topUpHand(room, player) {
+  if (player.id === room.hostPlayerId) {
+    player.hand = [];
+    return;
+  }
+
   while (player.hand.length < HAND_SIZE) {
     const card = drawCard(room);
     if (!card) break;
@@ -624,7 +632,7 @@ function discardRandomCard(player, room) {
   }
 
   const index = randomInt(0, player.hand.length - 1);
-  const [card] = player.hand.splice(index, 1);
+  const card = player.hand.splice(index, 1)[0];
   if (card) {
     room.discardPile.push(card);
   }
@@ -632,11 +640,14 @@ function discardRandomCard(player, room) {
 }
 
 function playerHasPlayableCard(room, player) {
+  if (player.id === room.hostPlayerId) {
+    return false;
+  }
   return player.hand.some((card) => isCardPlayable(room, player, card));
 }
 
 function isCardPlayable(room, player, card) {
-  const currentPlayer = room.players[room.turnIndex];
+  const currentPlayer = getCurrentTurnPlayer(room);
   if (!currentPlayer || currentPlayer.id !== player.id) {
     return false;
   }
@@ -668,8 +679,9 @@ function isExpressionValid(stack) {
 }
 
 function advanceTurn(room) {
+  const activePlayers = getActivePlayers(room);
   room.playedTurnsThisRound += 1;
-  room.turnIndex = (room.turnIndex + 1) % room.players.length;
+  room.turnIndex = activePlayers.length ? (room.turnIndex + 1) % activePlayers.length : 0;
 }
 
 function appendCardToStack(room, card) {
@@ -682,7 +694,6 @@ function appendCardToStack(room, card) {
 
 function finishGame(room, reason) {
   clearAnswerTimer(room);
-  clearAutoClosePreviewTimer(room);
   room.phase = "finished";
   room.winnerText = reason === computeWinnerText(room) ? reason : computeWinnerText(room);
   room.deckRemaining = room.deck.length;
@@ -692,7 +703,7 @@ function finishGame(room, reason) {
       result: room.stack.length && isExpressionValid(room.stack) ? evaluateExpression(room.stack).value : "-",
       answer: "-",
       correct: false,
-      responderName: room.players[room.responderIndex] ? room.players[room.responderIndex].name : "-",
+      responderName: getResponderPlayer(room) ? getResponderPlayer(room).name : "-",
       autoClosedRound: room.autoClosedRound,
       basePoints: 0,
       awardedPoints: 0,
@@ -724,6 +735,20 @@ function isHost(ws, room) {
   return !!player && player.id === room.hostPlayerId;
 }
 
+function getActivePlayers(room) {
+  return room.players.filter((player) => player.id !== room.hostPlayerId);
+}
+
+function getCurrentTurnPlayer(room) {
+  const activePlayers = getActivePlayers(room);
+  return activePlayers.length ? activePlayers[room.turnIndex % activePlayers.length] : null;
+}
+
+function getResponderPlayer(room) {
+  const activePlayers = getActivePlayers(room);
+  return activePlayers.length ? activePlayers[room.responderIndex % activePlayers.length] : null;
+}
+
 function expectedType(room) {
   const top = room.stack[room.stack.length - 1];
   return top && top.type === "number" ? "operator" : "number";
@@ -740,12 +765,13 @@ function broadcastRoom(room) {
 }
 
 function publicRoomState(room) {
-  const responder = room.players[room.responderIndex] || null;
-  const turnPlayer = room.players[room.turnIndex] || null;
+  const responder = getResponderPlayer(room);
+  const turnPlayer = getCurrentTurnPlayer(room);
   return {
     code: room.code,
     phase: room.phase,
     playerCount: room.playerCount,
+    activePlayerCount: getActivePlayers(room).length,
     round: room.round,
     maxRounds: room.maxRounds,
     targetScore: room.targetScore,
@@ -763,7 +789,8 @@ function publicRoomState(room) {
       id: player.id,
       name: player.name,
       score: player.score,
-      isHost: player.id === room.hostPlayerId
+      isHost: player.id === room.hostPlayerId,
+      isSpectator: player.id === room.hostPlayerId
     })),
     lastResult: room.lastResult,
     winnerText: room.winnerText,
@@ -773,8 +800,8 @@ function publicRoomState(room) {
 }
 
 function privateView(room, player) {
-  const currentPlayer = room.players[room.turnIndex] || null;
-  const hand = player.hand.map((card) => ({
+  const currentPlayer = getCurrentTurnPlayer(room);
+  const hand = (player.id === room.hostPlayerId ? [] : player.hand).map((card) => ({
     id: card.id,
     type: card.type,
     value: card.value,
@@ -805,12 +832,13 @@ function privateView(room, player) {
   return {
     you: {
       id: player.id,
-      name: player.name
+      name: player.name,
+      isSpectator: player.id === room.hostPlayerId
     },
     hand: room.phase === "lobby" ? [] : hand,
     stack: stack,
-    canPlay: room.phase === "playing" && currentPlayer && currentPlayer.id === player.id,
-    canAnswer: room.phase === "answer" && room.players[room.responderIndex] && room.players[room.responderIndex].id === player.id,
+    canPlay: room.phase === "playing" && currentPlayer && currentPlayer.id === player.id && player.id !== room.hostPlayerId,
+    canAnswer: room.phase === "answer" && getResponderPlayer(room) && getResponderPlayer(room).id === player.id,
     memoryPeek: player.memoryPeek,
     infoMessage: makeInfoMessage(room, player)
   };
@@ -818,11 +846,16 @@ function privateView(room, player) {
 
 function makeInfoMessage(room, player) {
   if (room.phase === "lobby") {
-    return "Lobby aberto. Aguarde o host iniciar a partida.";
+    return player.id === room.hostPlayerId
+      ? "Voce sera o host espectador. Aguarde os jogadores entrarem e inicie a partida."
+      : "Lobby aberto. Aguarde o host iniciar a partida.";
   }
 
   if (room.phase === "playing") {
-    const current = room.players[room.turnIndex];
+    const current = getCurrentTurnPlayer(room);
+    if (player.id === room.hostPlayerId) {
+      return current ? "Voce esta assistindo. " + current.name + " esta jogando agora." : "Voce esta assistindo a partida.";
+    }
     if (current && current.id === player.id) {
       return "Seu turno. Numeros sobre numeros viram soma automaticamente.";
     }
@@ -830,7 +863,10 @@ function makeInfoMessage(room, player) {
   }
 
   if (room.phase === "answer") {
-    const responder = room.players[room.responderIndex];
+    const responder = getResponderPlayer(room);
+    if (player.id === room.hostPlayerId) {
+      return responder ? "Voce esta assistindo. " + responder.name + " esta respondendo agora." : "Voce esta assistindo a resposta.";
+    }
     if (responder && responder.id === player.id) {
       return "Sua vez de responder o resultado da expressao.";
     }
@@ -838,7 +874,9 @@ function makeInfoMessage(room, player) {
   }
 
   if (room.phase === "auto_close_preview") {
-    return "Fechamento automatico da rodada. Memorize as duas cartas finais.";
+    return player.id === room.hostPlayerId
+      ? "Voce esta assistindo o fechamento automatico da rodada."
+      : "Fechamento automatico da rodada. Memorize as duas cartas finais.";
   }
 
   if (room.phase === "reveal") {
@@ -988,7 +1026,7 @@ function randomInt(min, max) {
 
 function displayOperator(operator) {
   if (operator === "*") return "\u00d7";
-  return operator;
+  return operator === "/" ? "\u00f7" : operator;
 }
 
 function specialLabel(kind) {
@@ -1016,7 +1054,6 @@ function sendError(ws, message) {
 
 function enterAnswerPhase(room) {
   clearAnswerTimer(room);
-  clearAutoClosePreviewTimer(room);
   room.phase = "answer";
   room.answerDeadlineAt = Date.now() + ANSWER_TIME_MS;
   room.answerTimerId = setTimeout(() => {
@@ -1037,6 +1074,7 @@ function clearAutoClosePreviewTimer(room) {
     clearTimeout(room.autoClosePreviewTimerId);
     room.autoClosePreviewTimerId = null;
   }
+  room.finalAutoClosePreview = null;
 }
 
 function handleAnswerTimeout(room) {
@@ -1052,7 +1090,7 @@ function handleAnswerTimeout(room) {
     result: evaluation.value,
     answer: "Tempo esgotado",
     correct: false,
-    responderName: room.players[room.responderIndex] ? room.players[room.responderIndex].name : "-",
+    responderName: getResponderPlayer(room) ? getResponderPlayer(room).name : "-",
     autoClosedRound: room.autoClosedRound,
     basePoints: calculateComplexityPoints(evaluation.operatorCount),
     awardedPoints: 0,
