@@ -1537,12 +1537,12 @@
       els.roomCodeBox.textContent = appState.room.code;
       els.serverPreview.textContent = appState.serverUrl;
       syncSelected(document.querySelectorAll("#lobbyCountPick .toggle-btn"), appState.room.playerCount);
-      els.lobbySummary.textContent = "Sala com " + appState.room.players.length + " / " + appState.room.playerCount + " jogadores.";
-      setLobbyMessage(appState.room.players.length < appState.room.playerCount ? "Compartilhe o codigo com os amigos." : "Sala pronta para iniciar.");
-      els.startMatchButton.disabled = !isHost() || appState.room.players.length !== appState.room.playerCount;
+      els.lobbySummary.textContent = "Sala com 1 host assistindo e " + appState.room.activePlayerCount + " / " + appState.room.playerCount + " jogadores ativos.";
+      setLobbyMessage(appState.room.activePlayerCount < appState.room.playerCount ? "Compartilhe o codigo com os jogadores." : "Sala pronta para iniciar.");
+      els.startMatchButton.disabled = !isHost() || appState.room.activePlayerCount !== appState.room.playerCount;
 
       els.lobbyPlayers.innerHTML = appState.room.players.map((player) => {
-        const hostChip = player.isHost ? '<span class="chip">Host</span>' : "";
+        const hostChip = player.isHost ? '<span class="chip">Host espectador</span>' : "";
         const meText = player.id === appState.view.you.id ? " (voce)" : "";
         return '' +
           '<div class="lobby-player">' +
@@ -1613,7 +1613,7 @@
         : "";
       els.roundInfo.textContent = (appState.room.maxRounds ? (appState.room.round + " / " + appState.room.maxRounds) : String(appState.room.round)) + turnProgress;
       els.turnInfo.textContent = appState.room.turnPlayerName || "-";
-      els.responderInfo.textContent = appState.room.responderPlayerName || "-";
+      els.responderInfo.textContent = appState.room.responderPlayerName || (appState.view.you.isSpectator ? "Host assiste" : "-");
       renderAnswerTimer();
       if (appState.room.phase === "playing") {
         els.expectedInfo.textContent = labelType(appState.room.expectedType) + " | cava " + appState.room.deckRemaining;
@@ -1673,7 +1673,13 @@
       }
 
       const you = appState.view.you;
-      els.currentPlayer.textContent = you.name;
+      els.currentPlayer.textContent = you.isSpectator ? (you.name + " (assistindo)") : you.name;
+
+      if (you.isSpectator) {
+        els.handHint.textContent = "Voce esta assistindo a partida.";
+        els.handZone.innerHTML = "";
+        return;
+      }
 
       if (appState.room.phase !== "playing") {
         els.handHint.textContent = (appState.room.phase === "answer" || appState.room.phase === "auto_close_preview") ? "Aguardando resposta" : "";
@@ -2124,3 +2130,5 @@
   </script>
 </body>
 </html>
+
+
