@@ -237,8 +237,9 @@ function startGame(ws, room) {
     player.score = 0;
     player.hand = [];
     player.bonusArmed = false;
-    player.memoryPeek = null;
-  });
+      player.memoryPeek = null;
+      player.memoryArmed = false;
+    });
 
   startRound(room);
 }
@@ -282,8 +283,9 @@ function resetRoundState(room) {
 
   room.players.forEach((player) => {
     player.bonusArmed = false;
-    player.memoryPeek = null;
-  });
+      player.memoryPeek = null;
+      player.memoryArmed = false;
+    });
 }
 
 function playCard(ws, room, data) {
@@ -508,6 +510,7 @@ function advanceRound(ws, room) {
       player.hand = [];
       player.bonusArmed = false;
       player.memoryPeek = null;
+      player.memoryArmed = false;
     });
     startRound(room);
     return;
@@ -585,11 +588,7 @@ function applySpecialCard(room, player, card) {
   }
 
   if (card.value === "memory_extra") {
-    const currentExpression = room.stack.length ? expressionFromCards(room.stack) : "Sem cartas na pilha";
-    player.memoryPeek = {
-      id: createId(),
-      expression: currentExpression
-    };
+    player.memoryArmed = true;
   }
 }
 
@@ -899,7 +898,8 @@ function buildPlayer(ws, name, isHostPlayer) {
     hand: [],
     isHost: isHostPlayer,
     bonusArmed: false,
-    memoryPeek: null
+    memoryPeek: null,
+    memoryArmed: false
   };
 }
 
@@ -1055,6 +1055,19 @@ function sendError(ws, message) {
 function enterAnswerPhase(room) {
   clearAnswerTimer(room);
   room.phase = "answer";
+
+  room.players.forEach((player) => {
+    player.memoryPeek = null;
+  });
+
+  const responder = getResponderPlayer(room);
+  if (responder && responder.memoryArmed) {
+    responder.memoryPeek = {
+      id: createId(),
+      expression: room.stack.length ? expressionFromCards(room.stack) : "Sem conta atual"
+    };
+  }
+
   room.answerDeadlineAt = Date.now() + ANSWER_TIME_MS;
   room.answerTimerId = setTimeout(() => {
     handleAnswerTimeout(room);
@@ -1108,3 +1121,8 @@ function handleAnswerTimeout(room) {
   room.deckRemaining = room.deck.length;
   broadcastRoom(room);
 }
+
+
+
+
+
